@@ -33,8 +33,9 @@ spec:
     
     webhooks:
     - name: load-test
-      url: http://flagger-loadtester.production/
+      # Use full FQDN — short names don't resolve across namespaces
+      url: http://flagger-loadtester.production.svc.cluster.local/
       timeout: 5s
       metadata:
         type: cmd
-        cmd: "hey -z 1m -q 10 -c 2 http://mario-service.production/"
+        cmd: "hey -z 1m -q 10 -c 2 http://mario-service.production.svc.cluster.local/"

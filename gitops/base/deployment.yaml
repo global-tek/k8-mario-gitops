@@ -14,14 +14,11 @@ spec:
       labels:
         app: mario
         version: stable
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8080"
     spec:
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
+        runAsUser: 101   # nginx user in official nginx image
+        fsGroup: 101
       containers:
       - name: mario-container
         image: mario-game
@@ -55,3 +52,19 @@ spec:
           capabilities:
             drop:
               - ALL
+        # Required: Nginx needs to write to these paths but they are root-owned.
+        # Without these emptyDir mounts, the pod crashes with Permission denied.
+        volumeMounts:
+        - name: nginx-cache
+          mountPath: /var/cache/nginx
+        - name: nginx-run
+          mountPath: /var/run
+        - name: nginx-tmp
+          mountPath: /tmp
+      volumes:
+      - name: nginx-cache
+        emptyDir: {}
+      - name: nginx-run
+        emptyDir: {}
+      - name: nginx-tmp
+        emptyDir: {}

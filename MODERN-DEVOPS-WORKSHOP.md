@@ -235,6 +235,8 @@ configMapGenerator:
 
 **Create base/deployment.yaml (improved):**
 
+> **⚠️ Nginx Non-Root Warning:** The mario image runs Nginx. When you set `runAsNonRoot: true`, Nginx can't write to `/var/cache/nginx`, `/var/run`, or `/tmp` because those directories are owned by root. You **must** mount emptyDir volumes over those paths or the pod will CrashLoopBackOff with `Permission denied`. Also, do **not** add `prometheus.io/scrape` annotations — the mario app is a static Nginx site with no `/metrics` endpoint. Metrics come from the Istio sidecar (see Module 5).
+
 ```yaml
 # gitops/base/deployment.yaml
 apiVersion: apps/v1
@@ -253,14 +255,11 @@ spec:
       labels:
         app: mario
         version: stable
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8080"
     spec:
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
+        runAsUser: 101   # nginx user in official nginx image
+        fsGroup: 101
       containers:
       - name: mario-container
         image: mario-game  # Reference, replaced by Kustomize
@@ -294,9 +293,27 @@ spec:
           capabilities:
             drop:
               - ALL
+        # Required: Nginx needs to write to these paths but they are root-owned.
+        # Without these emptyDir mounts, the pod crashes with Permission denied.
+        volumeMounts:
+        - name: nginx-cache
+          mountPath: /var/cache/nginx
+        - name: nginx-run
+          mountPath: /var/run
+        - name: nginx-tmp
+          mountPath: /tmp
+      volumes:
+      - name: nginx-cache
+        emptyDir: {}
+      - name: nginx-run
+        emptyDir: {}
+      - name: nginx-tmp
+        emptyDir: {}
 ```
 
 **Create base/service.yaml:**
+
+> **⚠️ Service type with Istio:** When Flagger and Istio manage traffic, the Service must be `ClusterIP`. Flagger creates its own VirtualService to route traffic between `-primary` and `-canary` variants — a `LoadBalancer` type service bypasses this entirely and confuses Flagger's init. External access is handled by the Istio Gateway/VirtualService, not the Service type.
 
 ```yaml
 # gitops/base/service.yaml
@@ -305,7 +322,7 @@ kind: Service
 metadata:
   name: mario-service
 spec:
-  type: LoadBalancer
+  type: ClusterIP   # IMPORTANT: Must be ClusterIP when using Istio + Flagger
   selector:
     app: mario
   ports:
@@ -812,23 +829,33 @@ kubectl get pods -n istio-system
 
 ### Step 4.2: Install Flagger
 
+> **⚠️ CRD Ownership Trap:** Do NOT manually `kubectl apply` the CRDs and then pass `--set crd.create=false` to Helm. kubectl-applied CRDs are owned by `kubectl-client-side-apply`, and Helm will refuse to take ownership, printing a conflict error like: `conflict with "kubectl-client-side-apply" using apiextensions.k8s.io/v1`. Instead, let Helm install and own the CRDs by omitting the `--set crd.create=false` flag.
+>
+> **⚠️ Prometheus FQDN:** The Prometheus service lives in the `monitoring` namespace. Short names like `http://prometheus:9090` or `http://prometheus.istio-system:9090` will silently fail — Flagger will log that it can't reach metrics and all canaries will be stuck in `Progressing`. Always use the full cluster-local FQDN.
+
 ```bash
 # Add Flagger Helm repository
 helm repo add flagger https://flagger.app
+helm repo update
 
-# Install Flagger with Istio support
-kubectl apply -f https://raw.githubusercontent.com/fluxcd/flagger/main/artifacts/flagger/crd.yaml
-
+# Install Flagger — let Helm manage CRDs (do NOT pre-apply CRDs manually)
+# The metricsServer MUST use the full FQDN to reach Prometheus across namespaces.
+# Replace "prometheus-kube-prometheus-prometheus" if your Prometheus service name differs:
+#   kubectl get svc -n monitoring | grep prometheus
 helm upgrade -i flagger flagger/flagger \
   --namespace=istio-system \
-  --set crd.create=false \
   --set meshProvider=istio \
-  --set metricsServer=http://prometheus.istio-system:9090
+  --set metricsServer=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
 
-# Install Grafana for visualization (optional)
-helm upgrade -i flagger-grafana flagger/grafana \
-  --namespace=istio-system \
-  --set url=http://prometheus.istio-system:9090
+# Verify Flagger is running and can reach Prometheus
+kubectl -n istio-system logs deployment/flagger | grep -i prometheus
+# Expected: no "connection refused" or "no such host" errors
+
+# Install Flagger load tester (REQUIRED for canary webhooks in Step 4.3)
+kubectl apply -k https://github.com/fluxcd/flagger//kustomize/tester?ref=main -n production
+
+# Verify load tester is up
+kubectl get deploy -n production flagger-loadtester
 ```
 
 ### Step 4.3: Create Canary Resource
@@ -879,14 +906,15 @@ spec:
         max: 500
       interval: 1m
     
-    # Webhooks for notifications (optional)
+    # Webhooks — the load tester must already be installed (see Step 4.2).
+    # Use full FQDNs for cross-namespace URLs; short names don't resolve.
     webhooks:
     - name: load-test
-      url: http://flagger-loadtester.production/
+      url: http://flagger-loadtester.production.svc.cluster.local/
       timeout: 5s
       metadata:
         type: cmd
-        cmd: "hey -z 1m -q 10 -c 2 http://mario-service.production/"
+        cmd: "hey -z 1m -q 10 -c 2 http://mario-service.production.svc.cluster.local/"
 ```
 
 **Update production kustomization to include canary:**
@@ -956,33 +984,50 @@ helm repo add prometheus-community https://prometheus-community.github.io/helm-c
 helm repo update
 
 # Install kube-prometheus-stack
+# The *SelectorNilUsesHelmValues=false flags are critical: without them, Prometheus
+# only watches ServiceMonitors/PodMonitors that have the Helm release label, so
+# Istio's monitors (installed separately) are ignored and Flagger has no metrics.
 helm install prometheus prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
   --create-namespace \
-  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+  --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
+  --set prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues=false
 
 # Verify
 kubectl get pods -n monitoring
+
+# Enable Istio metrics scraping via Prometheus Operator CRs.
+# kube-prometheus-stack does NOT scrape Istio by default.
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/addons/extras/prometheus-operator.yaml
+
+# Verify Istio PodMonitors/ServiceMonitors are picked up
+kubectl get podmonitor,servicemonitor -n istio-system
 ```
 
-### Step 5.2: Create ServiceMonitor for Mario App
+### Step 5.2: Mario App Metrics — Use Istio Sidecar, Not ServiceMonitor
 
-```yaml
-# gitops/overlays/production/servicemonitor.yaml
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: mario-metrics
-  namespace: production
-spec:
-  selector:
-    matchLabels:
-      app: mario
-  endpoints:
-  - port: http
-    interval: 30s
-    path: /metrics  # If your app exposes metrics
+> **⚠️ Do NOT create a ServiceMonitor for Mario.** The mario app is a static Nginx site. It does not have a `/metrics` endpoint. If you create a ServiceMonitor pointing to it, Prometheus will show the target as DOWN with a 404 error on every scrape.
+>
+> The correct approach is to rely on the **Istio Envoy sidecar**, which is injected into every pod in the `production` namespace and exposes rich L7 metrics (request rate, latency, error rate) automatically. These are scraped by the PodMonitors installed in Step 5.1.
+>
+> **Flagger's built-in metric templates** (`request-success-rate`, `request-duration`) query these Istio metrics — no custom `/metrics` endpoint is required.
+
+To verify Istio is generating metrics for mario:
+
+```bash
+# Confirm the sidecar is injected (look for 2/2 READY)
+kubectl get pods -n production
+
+# Query Istio request metrics directly
+kubectl exec -n monitoring -it deployment/prometheus-kube-prometheus-prometheus -- \
+  wget -qO- 'http://localhost:9090/api/v1/query?query=istio_requests_total' | python3 -m json.tool | head -40
+
+# If the query returns empty, Istio PodMonitors may not be installed — re-run the
+# prometheus-operator.yaml step from Step 5.1.
 ```
+
+If you want **custom application-level metrics** in the future, add a Prometheus exporter sidecar or use an app framework that exposes `/metrics`. For this workshop, Istio sidecar metrics are sufficient for Flagger's canary analysis.
 
 ### Step 5.3: Access Grafana
 
@@ -998,12 +1043,56 @@ kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
 # Password: (from above)
 ```
 
-### Step 5.4: Import Flagger Dashboard
+### Step 5.4: Import Grafana Dashboards
 
-1. Go to Grafana → Dashboards → Import
-2. Enter dashboard ID: `15170` (Flagger Canary dashboard)
-3. Select Prometheus data source
-4. Click Import
+> **⚠️ Grafana.com dashboard IDs may not resolve** (shows "Dashboard not found" or times out). Use the JSON download approach instead.
+>
+> **⚠️ Data source dropdown:** When importing, Grafana shows a `DS_PROMETHEUS` variable with an "Instance name filter" field. Leave that field **blank** — do not paste a URL into it. Select your Prometheus data source from the dropdown to the right of it.
+>
+> **⚠️ Flagger renames services:** Flagger creates `mario-service-primary` and `mario-service-canary` — the original `mario-service` only exists as a routing alias. Standard Istio dashboards filter on `destination_service_name="mario-service"` which returns no data. Use regex in PromQL instead:
+> ```
+> destination_service_name=~"mario-service.*"
+> ```
+
+**Recommended dashboards:**
+
+```bash
+# Option A: Import by ID (try first, falls back to Option B if it fails)
+# In Grafana UI: Dashboards → Import → Enter ID → Load → Select Prometheus data source → Import
+# Istio Service Dashboard: 7636
+# Istio Workload Dashboard: 7630
+# Flagger Canary: 15170
+
+# Option B: Download JSON and import manually (more reliable)
+# 1. Go to https://grafana.com/grafana/dashboards/7636
+# 2. Click "Download JSON"
+# 3. In Grafana: Dashboards → Import → Upload JSON file
+# 4. Select Prometheus data source and import
+```
+
+**Custom mario dashboard (use this if imported dashboards show "No data"):**
+
+```bash
+# Port-forward Prometheus to test your queries first
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090 &
+
+# Test: should return data if Istio sidecar metrics are flowing
+curl 'http://localhost:9090/api/v1/query?query=sum(irate(istio_requests_total%7Bdestination_service_name%3D~%22mario-service.*%22%7D%5B1m%5D))'
+```
+
+**In Grafana, create a panel with these PromQL queries:**
+
+```promql
+# Request rate (use regex to catch -primary and -canary variants)
+sum(irate(istio_requests_total{destination_service_name=~"mario-service.*", reporter="destination"}[1m])) by (destination_service_name)
+
+# Success rate (non-5xx)
+sum(irate(istio_requests_total{destination_service_name=~"mario-service.*", response_code!~"5.*"}[1m])) /
+sum(irate(istio_requests_total{destination_service_name=~"mario-service.*"}[1m]))
+
+# P99 latency (ms)
+histogram_quantile(0.99, sum(irate(istio_request_duration_milliseconds_bucket{destination_service_name=~"mario-service.*"}[1m])) by (le))
+```
 
 **✅ Checkpoint 5:** Full observability stack is running with canary metrics.
 
@@ -1344,17 +1433,119 @@ kubectl apply -f policies/production-constraints.yaml
 
 ### Issue 3: Canary Stuck in Progressing
 
+The most common causes are: (a) Flagger can't reach Prometheus, (b) no traffic is flowing (no metrics), (c) load tester webhook URL is wrong.
+
 ```bash
-# Check Flagger logs
-kubectl logs -n istio-system deployment/flagger -f
+# Step 1: Check Flagger logs for the actual error
+kubectl logs -n istio-system deployment/flagger -f | grep -iE "error|warn|prometheus|metric|webhook"
 
-# Check metrics availability
-kubectl -n production exec -it deployment/mario-deployment -- wget -O- http://prometheus.istio-system:9090/api/v1/query?query=up
+# Step 2: Verify Flagger can reach Prometheus
+# Use the full FQDN — short names won't resolve across namespaces
+kubectl -n istio-system exec -it deployment/flagger -- \
+  wget -qO- 'http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/query?query=up' | head -c 200
 
-# Reset canary
+# Step 3: Check load tester is running (needed to generate traffic for metrics)
+kubectl get deploy -n production flagger-loadtester
+kubectl logs -n production deployment/flagger-loadtester | tail -20
+
+# Step 4: Verify Istio metrics exist for mario
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090 &
+curl -s 'http://localhost:9090/api/v1/query?query=count(istio_requests_total)' | python3 -m json.tool
+
+# Step 5: Reset canary (only after fixing root cause)
 kubectl -n production delete canary mario-canary
 kubectl apply -f gitops/overlays/production/canary.yaml
 ```
+
+### Issue 6: Flagger CRD Conflict / kubectl vs Helm Ownership
+
+**Error:** `conflict with "kubectl-client-side-apply" using apiextensions.k8s.io/v1`
+
+Caused by manually applying CRDs before letting Helm manage them.
+
+```bash
+# Option A (safest): Delete the kubectl-managed CRDs and reinstall via Helm
+kubectl delete crd canaries.flagger.app metrictemplate.flagger.app alertproviders.flagger.app
+helm upgrade -i flagger flagger/flagger \
+  --namespace=istio-system \
+  --set meshProvider=istio \
+  --set metricsServer=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+
+# Option B: Annotate CRDs to transfer ownership to Helm (non-destructive)
+for crd in canaries.flagger.app metrictemplates.flagger.app alertproviders.flagger.app; do
+  kubectl annotate crd "$crd" \
+    meta.helm.sh/release-name=flagger \
+    meta.helm.sh/release-namespace=istio-system \
+    --overwrite
+  kubectl label crd "$crd" \
+    app.kubernetes.io/managed-by=Helm \
+    --overwrite
+done
+helm upgrade -i flagger flagger/flagger \
+  --namespace=istio-system \
+  --set meshProvider=istio \
+  --set metricsServer=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+```
+
+### Issue 7: Nginx CrashLoopBackOff — Permission Denied
+
+**Error:** `mkdir() "/var/cache/nginx/client_temp" failed (13: Permission denied)`
+
+Caused by running Nginx with `runAsNonRoot: true` without providing writable temp directories.
+
+```bash
+# Verify the error
+kubectl logs -n production deployment/mario-deployment | grep -i permission
+
+# Patch the live primary deployment (Flagger manages mario-deployment-primary separately)
+kubectl -n production patch deployment mario-deployment-primary --type='json' -p='[
+  {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"nginx-cache","emptyDir":{}}},
+  {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"nginx-run","emptyDir":{}}},
+  {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"nginx-tmp","emptyDir":{}}},
+  {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"nginx-cache","mountPath":"/var/cache/nginx"}},
+  {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"nginx-run","mountPath":"/var/run"}},
+  {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"nginx-tmp","mountPath":"/tmp"}}
+]'
+
+# Long-term fix: add emptyDir volumeMounts to gitops/base/deployment.yaml (see Module 1.2)
+```
+
+### Issue 8: Prometheus Not Scraping Istio Metrics (Grafana shows "No data")
+
+**Symptom:** `count(istio_requests_total)` returns empty in Prometheus.
+
+```bash
+# Check if Istio PodMonitors/ServiceMonitors exist
+kubectl get podmonitor,servicemonitor -n istio-system
+
+# If missing, install them (requires kube-prometheus-stack to already be running):
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/addons/extras/prometheus-operator.yaml
+
+# Verify they are picked up (may take 30-60s)
+kubectl get podmonitor,servicemonitor -n istio-system
+
+# Check if Prometheus is matching them (look for istio in targets)
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9090:9090 &
+# Open http://localhost:9090/targets and look for istio entries
+
+# If targets exist but show DOWN, check the Prometheus selector flags were set at install time:
+# prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false
+# Without this flag, Prometheus only watches monitors with the Helm release label.
+```
+
+### Issue 9: Grafana Dashboard "No data" Despite Metrics Existing
+
+**Root cause A — Flagger service naming:** Flagger creates `mario-service-primary` and `mario-service-canary`. Dashboards that filter on `destination_service_name="mario-service"` return nothing.
+
+**Fix:** Edit dashboard panels and add a regex label matcher:
+```promql
+# Change:  destination_service_name="mario-service"
+# To:      destination_service_name=~"mario-service.*"
+```
+
+**Root cause B — Wrong data source configuration:** The `DS_PROMETHEUS` variable's "Instance name filter" field has a URL pasted into it.
+
+**Fix:** In Grafana → Dashboard settings → Variables → DS_PROMETHEUS → clear the Instance name filter field completely, then select the Prometheus data source from the dropdown.
 
 ### Issue 4: Image Pull Errors from ECR
 

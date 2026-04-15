@@ -184,9 +184,20 @@ k8s-mario/
 **Action Items:**
 
 ```bash
-# Create the new directory structure
-cd /Users/trdr/Documents/k8s-mario
+# Clone the repository
+git clone https://github.com/<your-username>/k8s-mario.git
+cd k8s-mario
 
+# Make scripts executable
+chmod +x setup.sh validate.sh
+
+# Run automated setup
+./setup.sh
+
+# Validate installation
+./validate.sh
+
+# Create the new directory structure
 mkdir -p gitops/base
 mkdir -p gitops/overlays/{dev,staging,production}
 mkdir -p gitops/argo-apps

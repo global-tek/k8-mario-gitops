@@ -185,7 +185,7 @@ k8s-mario/
 
 ```bash
 # Clone the repository
-git clone https://github.com/<your-username>/k8s-mario.git
+git clone https://github.com/global-tek/k8s-mario.git
 cd k8s-mario
 
 # Make scripts executable
@@ -205,6 +205,27 @@ mkdir -p .github/workflows
 mkdir -p policies
 mkdir -p docs/runbooks
 ```
+
+**Create AWS Resource**
+# Create ECR repository
+aws ecr create-repository \
+  --repository-name mario \
+  --region <your-region> \
+  --image-scanning-configuration scanOnPush=true
+
+# Create s3 bucket and make sure to update s3 bucket name in main.tf
+aws s3api create-bucket \
+  --bucket <your-unique-bucket-name> \
+  --region <your-region>
+
+# Get repository URI
+aws ecr describe-repositories \
+  --repository-names mario \
+  --region <your-region> \
+  --query 'repositories[0].repositoryUri' \
+  --output text
+
+# Save this URI!
 
 ### Step 1.2: Convert to Kustomize Base
 
@@ -234,7 +255,7 @@ commonLabels:
 
 images:
   - name: mario-game
-    newName: <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/mario
+    newName: <AWS_ACCOUNT_ID>.dkr.ecr.<your-region>.amazonaws.com/mario
     newTag: latest  # Will be overridden by environment
 
 configMapGenerator:

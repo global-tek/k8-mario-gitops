@@ -227,13 +227,14 @@ terraform plan
 terraform apply --auto-approve    # ~10 minutes
 ```
 
-After provisioning, update kubeconfig:
+# After provisioning, update kubeconfig:
 
 ```bash
 aws eks update-kubeconfig --name EKS_CLOUD --region <YOUR-REGION>
 ```
 
 # Create the new directory structure
+```bash
 mkdir -p gitops/base
 mkdir -p gitops/overlays/{dev,staging,production}
 mkdir -p gitops/argo-apps
@@ -244,12 +245,14 @@ mkdir -p docs/runbooks
 
 **Create AWS Resource**
 # Create ECR repository
+```bash
 aws ecr create-repository \
   --repository-name mario \
   --region <YOUR-REGION> \
   --image-scanning-configuration scanOnPush=true
-
+```
 # Create s3 bucket and make sure to update s3 bucket name in main.tf
+```bash
 aws s3api create-bucket \
   --bucket <YOUR-UNIQUE-BUCKET-NAME> \
   --region <YOUR-REGION>
@@ -260,7 +263,7 @@ aws ecr describe-repositories \
   --region <YOUR-REGION> \
   --query 'repositories[0].repositoryUri' \
   --output text
-
+```
 # Pull, Tag, and Push Mario Docker Image
 
 ```bash

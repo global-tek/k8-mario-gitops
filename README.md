@@ -7,44 +7,42 @@ This repository demonstrates the transformation from a **classic Jenkins pipelin
 ## 📁 Repository Structure
 
 ```
-k8s-mario/
+k8s-mario-v2/
 ├── README.md                          # This file
-├── MODERN-DEVOPS-WORKSHOP.md          # Complete workshop guide
-├── QUICK-REFERENCE.md                 # Command reference
-├── setup.sh                           # Automated setup script
-├── validate.sh                        # Validation script
-├── Dockerfile                         # Container image definition
-├── deployment.yaml                    # Legacy deployment (reference)
-├── service.yaml                       # Legacy service (reference)
-├── script.sh                          # Tool installation script
+├── MODERN-DEVOPS-WORKSHOP.md          # Complete 7-module workshop guide
+├── QUICK-REFERENCE.md                 # Command cheat-sheet
+├── custom_dashboard.json              # Pre-built Grafana dashboard
+├── script.sh                          # Tool installer (run first)
+├── setup.sh                           # Automated interactive setup
+├── validate.sh                        # Post-setup validation
 │
 ├── .github/workflows/                 # CI/CD Pipelines
-│   ├── ci-pipeline.yaml              # Main CI/CD pipeline
-│   └── security-scan.yaml            # Security scanning
+│   ├── ci-pipeline.yaml              # Build, scan, push, update GitOps
+│   └── security-scan.yaml            # Standalone security scanning
 │
-├── gitops/                            # GitOps manifests
-│   ├── base/                         # Base Kustomize configs
+├── gitops/                            # GitOps manifests (Kustomize)
+│   ├── base/                         # Shared base configs
 │   │   ├── kustomization.yaml
 │   │   ├── deployment.yaml
 │   │   └── service.yaml
-│   ├── overlays/                     # Environment-specific
+│   ├── overlays/                     # Environment-specific overrides
 │   │   ├── dev/
 │   │   │   └── kustomization.yaml
 │   │   └── production/
 │   │       ├── kustomization.yaml
 │   │       ├── deployment-patch.yaml
 │   │       └── canary.yaml
-│   └── argo-apps/                    # Argo CD Applications
+│   └── argo-apps/                    # Argo CD Application CRs
 │       ├── mario-production.yaml
 │       └── mario-dev.yaml
 │
-├── policies/                          # OPA Policies
+├── policies/                          # OPA Gatekeeper policies
 │   ├── k8s-require-resources.yaml
 │   ├── k8s-block-latest-tag.yaml
 │   ├── k8s-require-non-root.yaml
 │   └── production-constraints.yaml
 │
-└── EKS-TF/                            # Terraform for EKS
+└── EKS-TF/                            # Terraform — EKS cluster
     ├── main.tf
     ├── provider.tf
     └── backend.tf
@@ -66,17 +64,19 @@ k8s-mario/
 ### Option 1: Automated Setup
 
 ```bash
-# Clone the repository
-git clone https://github.com/<your-username>/k8s-mario.git
-cd k8s-mario
+# Clone and enter the repository
+git clone https://github.com/<your-username>/k8s-mario-v2.git
+cd k8s-mario-v2
 
-# Make scripts executable
+# Install all required tools (terraform, kubectl, aws-cli, docker, helm, gh)
+chmod +x script.sh && ./script.sh
+
+# Authenticate GitHub CLI, then run the interactive setup
+gh auth login
 chmod +x setup.sh validate.sh
-
-# Run automated setup
 ./setup.sh
 
-# Validate installation
+# Validate the installation
 ./validate.sh
 ```
 
@@ -154,15 +154,18 @@ Developer → Git Push → GitHub Actions (CI)
 ### Deploy a New Version
 
 ```bash
-# 1. Update image tag
-vim gitops/overlays/production/kustomization.yaml
+# 1. Create a feature branch and update the image tag
+git checkout -b feature/v1.2.0
+# Edit gitops/overlays/production/kustomization.yaml → update newTag
 
-# 2. Commit and push
+# 2. Commit, push, open a PR, and merge via gh CLI
 git add gitops/overlays/production/kustomization.yaml
 git commit -m "deploy: v1.2.0"
-git push
+git push origin feature/v1.2.0
+gh pr create --title "deploy: v1.2.0" --base main
+gh pr merge --merge --delete-branch
 
-# 3. Watch automatic deployment
+# 3. Watch Argo CD auto-sync (within ~3 minutes)
 kubectl get application -n argocd mario-production -w
 ```
 
@@ -211,9 +214,9 @@ Expected output:
 
 ## 📚 Documentation
 
-- **[MODERN-DEVOPS-WORKSHOP.md](MODERN-DEVOPS-WORKSHOP.md)** - Complete workshop with detailed explanations
-- **[QUICK-REFERENCE.md](QUICK-REFERENCE.md)** - Command reference guide
-- **[Modern DevOps Document](../Downloads/Modern-Devops-Devsecops.rtf)** - Theoretical background
+- **[MODERN-DEVOPS-WORKSHOP.md](MODERN-DEVOPS-WORKSHOP.md)** - Complete 7-module workshop guide
+- **[QUICK-REFERENCE.md](QUICK-REFERENCE.md)** - Command reference cheat-sheet
+- **[custom_dashboard.json](custom_dashboard.json)** - Pre-built Grafana dashboard (import via Grafana UI)
 
 ## 🎓 Learning Objectives
 
@@ -239,11 +242,11 @@ argocd app sync mario-production --force
 
 ### Pod Image Pull Errors
 ```bash
-# Create ECR credentials
+# Create ECR credentials (set AWS_REGION first)
 kubectl create secret docker-registry ecr-secret \
   --docker-server=<ecr-uri> \
   --docker-username=AWS \
-  --docker-password=$(aws ecr get-login-password --region ap-south-1) \
+  --docker-password=$(aws ecr get-login-password --region $AWS_REGION) \
   --namespace=production
 ```
 

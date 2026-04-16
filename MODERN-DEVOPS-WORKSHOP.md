@@ -144,6 +144,103 @@
 
 ---
 
+## 🔐 Step 0: EC2 IAM Instance Profile (Pre-flight Check)
+
+> **Workshop-provisioned EC2?** If your instance was pre-configured for this lab, **skip this section.**  
+> Confirm you already have credentials by running:
+> ```bash
+> aws sts get-caller-identity
+> ```
+> If you see your Account ID and a role ARN, you're good — proceed to Module 1.
+
+If the command returns an error or shows no role attached, follow one of the paths below to attach the required IAM instance profile from the CLI.
+
+---
+
+### Path A — No profile attached yet (fresh EC2)
+
+Run these commands from **any machine that has IAM permissions** (e.g., your local machine with admin keys, or AWS CloudShell).
+
+```bash
+# 1. Create the IAM role with an EC2 trust policy
+aws iam create-role \
+  --role-name k8s-mario-workshop-role \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": { "Service": "ec2.amazonaws.com" },
+      "Action": "sts:AssumeRole"
+    }]
+  }'
+
+# 2. Attach AdministratorAccess (sufficient for this workshop)
+aws iam attach-role-policy \
+  --role-name k8s-mario-workshop-role \
+  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+```
+
+> **Production note:** `AdministratorAccess` is broad. For a production environment, scope this down to the specific services needed: `AmazonEKSClusterPolicy`, `AmazonEC2ContainerRegistryFullAccess`, `AmazonS3FullAccess`, and relevant EKS node/worker policies.
+
+```bash
+# 3. Create an instance profile and attach the role to it
+aws iam create-instance-profile \
+  --instance-profile-name k8s-mario-workshop-profile
+
+aws iam add-role-to-instance-profile \
+  --instance-profile-name k8s-mario-workshop-profile \
+  --role-name k8s-mario-workshop-role
+
+# 4. Get the EC2 instance ID (run this ON the EC2 instance itself)
+export INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+echo "Instance ID: $INSTANCE_ID"
+
+# 5. Associate the profile with the running instance
+aws ec2 associate-iam-instance-profile \
+  --instance-id $INSTANCE_ID \
+  --iam-instance-profile Name=k8s-mario-workshop-profile
+```
+
+---
+
+### Path B — A different profile is already attached (need to swap it)
+
+```bash
+# 1. Get the existing association ID
+export INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+
+export ASSOC_ID=$(aws ec2 describe-iam-instance-profile-associations \
+  --filters Name=instance-id,Values=$INSTANCE_ID \
+  --query 'IamInstanceProfileAssociations[0].AssociationId' \
+  --output text)
+echo "Association ID: $ASSOC_ID"
+
+# 2. Replace the existing profile with the workshop profile
+aws ec2 replace-iam-instance-profile-association \
+  --association-id $ASSOC_ID \
+  --iam-instance-profile Name=k8s-mario-workshop-profile
+```
+
+---
+
+### Verify (both paths)
+
+> Wait ~30 seconds after associating — there is a short propagation delay before the new credentials are available on the instance.
+
+```bash
+# Confirm the role is active
+aws sts get-caller-identity
+
+# Confirm the required policies are attached
+aws iam list-attached-role-policies \
+  --role-name k8s-mario-workshop-role \
+  --query 'AttachedPolicies[].PolicyName'
+```
+
+Expected output from `get-caller-identity` should show an ARN containing `k8s-mario-workshop-role`.
+
+---
+
 ## 📦 Module 1: Repository Restructuring
 
 ### Step 1.1: Create GitOps Repository Structure
@@ -1250,6 +1347,16 @@ kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
 # 2. Click "Download JSON"
 # 3. In Grafana: Dashboards → Import → Upload JSON file
 # 4. Select Prometheus data source and import
+
+# Option C: Use the workshop's pre-built dashboard (recommended if A or B show "No data")
+# The repo includes custom_dashboard.json — a dashboard pre-tuned for this workshop.
+# It uses regex label matchers (mario-service.*) to handle Flagger's service renaming,
+# so it works correctly whether or not a canary is active.
+#
+# 1. In Grafana: Dashboards → Import → Upload JSON file
+# 2. Select custom_dashboard.json from the repo root
+# 3. Select your Prometheus data source from the dropdown (leave Instance name filter blank)
+# 4. Click Import
 ```
 
 **Custom mario dashboard (use this if imported dashboards show "No data"):**

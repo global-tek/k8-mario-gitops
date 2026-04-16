@@ -3,6 +3,12 @@
 
 set -e
 
+# Use AWS_REGION env var if set; otherwise prompt
+if [ -z "$AWS_REGION" ]; then
+    read -p "Enter your AWS region (e.g. us-east-1): " AWS_REGION
+fi
+export AWS_REGION
+
 echo "🔍 Validating Modern DevOps Setup"
 echo "=================================="
 echo ""
@@ -170,10 +176,10 @@ fi
 # Check ECR repository
 echo ""
 echo "9. Checking ECR Repository..."
-if aws ecr describe-repositories --repository-names mario --region ap-south-1 &> /dev/null; then
+if aws ecr describe-repositories --repository-names mario --region $AWS_REGION &> /dev/null; then
     check_pass "ECR repository exists"
     
-    ECR_URI=$(aws ecr describe-repositories --repository-names mario --region ap-south-1 --query 'repositories[0].repositoryUri' --output text)
+    ECR_URI=$(aws ecr describe-repositories --repository-names mario --region $AWS_REGION --query 'repositories[0].repositoryUri' --output text)
     echo "   Repository URI: $ECR_URI"
 else
     check_fail "ECR repository not found"

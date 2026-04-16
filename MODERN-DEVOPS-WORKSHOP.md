@@ -183,31 +183,61 @@ k8s-mario/
 
 **Action Items:**
 
+#### 1. Install and Authenticate with GitHub CLI
+
 ```bash
-# Clone the repository
-git clone https://github.com/global-tek/k8s-mario.git
-cd k8s-mario
+# Install gh CLI (Ubuntu/Debian)
+(type -p wget >/dev/null || (sudo apt update && sudo apt-get install wget -y)) \
+  && sudo mkdir -p -m 755 /etc/apt/keyrings \
+  && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+     | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+  && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] \
+     https://cli.github.com/packages stable main" \
+     | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+  && sudo apt update \
+  && sudo apt install gh -y
 
-# Make script executable
+# Authenticate — follow the prompts (select GitHub.com → HTTPS → Login with a web browser)
+gh auth login
+
+# Verify
+gh auth status
+```
+
+#### 2. Clone, Rename, and Push to Your Repository
+
+```bash
+# Clone the source repo into a new directory named k8s-mario-v2
+git clone https://github.com/Aj7Ay/k8s-mario.git k8s-mario-v2
+cd k8s-mario-v2
+
+# Remove the upstream remote so you start clean
+git remote remove origin
+
+# Create a new public GitHub repo and wire it as origin
+gh repo create k8s-mario-v2 --public
+git remote add origin https://github.com/<YOUR-USERNAME>/k8s-mario-v2.git
+git push -u origin main
+```
+
+#### 3. Install Workshop Tools
+
+```bash
+# Make the bootstrap script executable and run it
 chmod +x script.sh
-
-# Execute script
 ./script.sh
 
-# Verify installations
+# Verify all tools installed correctly
 docker --version
 aws --version
 kubectl version --client
 terraform --version
 ```
 
-**Generate a GitHub Personal Access Token** and set your remote:
+#### 4. Create `.gitignore`
 
-```bash
-git remote set-url origin https://<USERNAME>:<TOKEN>@github.com/<USERNAME>/k8s-mario.git
-```
-
-**Create a `.gitignore`** to prevent tracking large/binary files:
+Create a `.gitignore` at the repo root to prevent committing large/binary files:
 
 ```
 .terraform*
@@ -217,7 +247,45 @@ aws*
 kubectl
 ```
 
-# Deploy EKS Cluster with Terraform
+```bash
+git add .gitignore
+git commit -m "chore: add .gitignore"
+git push
+```
+
+#### 5. Create AWS Resources
+
+> **Complete this before running Terraform** — the S3 bucket must exist before `terraform init` can use it as a remote backend.
+
+```bash
+# Set your region once and reuse it throughout the workshop
+export AWS_REGION=<YOUR-REGION>
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# Create the S3 bucket for Terraform remote state
+# Then update EKS-TF/main.tf with this exact bucket name
+aws s3api create-bucket \
+  --bucket <YOUR-UNIQUE-BUCKET-NAME> \
+  --region $AWS_REGION
+
+# Create ECR repository for the Mario image
+aws ecr create-repository \
+  --repository-name mario \
+  --region $AWS_REGION \
+  --image-scanning-configuration scanOnPush=true
+
+# Capture and save your ECR URI — you will need it in Step 1.2
+export ECR_URI=$(aws ecr describe-repositories \
+  --repository-names mario \
+  --region $AWS_REGION \
+  --query 'repositories[0].repositoryUri' \
+  --output text)
+echo "ECR URI: $ECR_URI"
+```
+
+> **Update `EKS-TF/main.tf`** — replace the S3 bucket name placeholder with the bucket name you created above before running Terraform.
+
+#### 6. Deploy EKS Cluster with Terraform
 
 ```bash
 cd EKS-TF/
@@ -227,13 +295,12 @@ terraform plan
 terraform apply --auto-approve    # ~10 minutes
 ```
 
-# After provisioning, update kubeconfig:
+> **The cluster takes ~10 minutes to provision. Continue to Steps 1.2 and 1.3 now** to create the GitOps directory structure and Kustomize files while you wait. Return here when `terraform apply` completes, then proceed to Step 1.4.
 
-```bash
-aws eks update-kubeconfig --name EKS_CLOUD --region <YOUR-REGION>
-```
+#### 7. Create the GitOps Directory Structure
 
-# Create the new directory structure
+> Run these commands at the repo root (`k8s-mario-v2/`) before building out the files in Steps 1.2 and 1.3.
+
 ```bash
 mkdir -p gitops/base
 mkdir -p gitops/overlays/{dev,staging,production}
@@ -242,39 +309,6 @@ mkdir -p .github/workflows
 mkdir -p policies
 mkdir -p docs/runbooks
 ```
-
-**Create AWS Resource**
-# Create ECR repository
-```bash
-aws ecr create-repository \
-  --repository-name mario \
-  --region <YOUR-REGION> \
-  --image-scanning-configuration scanOnPush=true
-```
-# Create s3 bucket and make sure to update s3 bucket name in main.tf
-```bash
-aws s3api create-bucket \
-  --bucket <YOUR-UNIQUE-BUCKET-NAME> \
-  --region <YOUR-REGION>
-
-# Get repository URI
-aws ecr describe-repositories \
-  --repository-names mario \
-  --region <YOUR-REGION> \
-  --query 'repositories[0].repositoryUri' \
-  --output text
-```
-# Pull, Tag, and Push Mario Docker Image
-
-```bash
-aws ecr get-login-password --region <YOUR-REGION> | docker login --username AWS --password-stdin <ACCOUNT-ID>.dkr.ecr.us-west-2.amazonaws.com
-
-docker pull sevenajay/mario:latest
-docker tag mario:latest <ACCOUNT-ID>.dkr.ecr.us-west-2.amazonaws.com/mario:latest
-docker push <ACCOUNT-ID>.dkr.ecr.us-west-2.amazonaws.com/mario:latest
-```
-
-# Save this URI!
 
 ### Step 1.2: Convert to Kustomize Base
 
@@ -494,17 +528,54 @@ configMapGenerator:
       - ENVIRONMENT=dev
 ```
 
-### Step 1.4: Validation
+### Step 1.4: Connect to the Cluster, Push the Image, and Validate
+
+> **Run this step only after `terraform apply` has completed successfully.**
+
+#### Connect kubectl to Your New Cluster
 
 ```bash
-# Test Kustomize build
+aws eks update-kubeconfig --name EKS_CLOUD --region $AWS_REGION
+kubectl get nodes    # Verify nodes are Ready
+```
+
+#### Pull, Tag, and Push the Mario Image to ECR
+
+```bash
+# Authenticate Docker to ECR
+aws ecr get-login-password --region $AWS_REGION \
+  | docker login --username AWS --password-stdin $ECR_URI
+
+# Pull the public Mario image, re-tag it for your ECR, and push
+docker pull sevenajay/mario:latest
+docker tag sevenajay/mario:latest $ECR_URI:latest
+docker push $ECR_URI:latest
+echo "Image pushed: $ECR_URI:latest"
+```
+
+> Update the `newName` value in `gitops/base/kustomization.yaml` with your ECR URI if you haven't already.
+
+#### Validate Kustomize Manifests
+
+```bash
+# Render the production overlay
 kubectl kustomize gitops/overlays/production
 
-# Validate YAML
+# Dry-run against the cluster to catch any schema errors
 kubectl kustomize gitops/overlays/production | kubectl apply --dry-run=client -f -
 ```
 
-**✅ Checkpoint 1:** You should now have a properly structured GitOps repository.
+#### Commit and Push Everything to k8s-mario-v2
+
+```bash
+cd ..    # Back to repo root if you changed directories
+
+git add gitops/ .github/ policies/ docs/
+git commit -m "feat: add GitOps structure, Kustomize base, and environment overlays"
+git push origin main
+```
+
+**✅ Checkpoint 1:** GitOps repository is structured, EKS is running, and your manifests are pushed to GitHub. Argo CD installation comes next.
 
 ---
 
@@ -574,7 +645,7 @@ spec:
   project: default
   
   source:
-    repoURL: https://github.com/<YOUR-USERNAME>/k8s-mario.git
+    repoURL: https://github.com/<YOUR-USERNAME>/k8s-mario-v2.git
     targetRevision: main
     path: gitops/overlays/production
   
@@ -634,7 +705,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/<YOUR-USERNAME>/k8s-mario.git
+    repoURL: https://github.com/<YOUR-USERNAME>/k8s-mario-v2.git
     targetRevision: develop  # Different branch for dev
     path: gitops/overlays/dev
   destination:
@@ -648,33 +719,57 @@ spec:
       - CreateNamespace=true
 ```
 
+#### Commit and Push Argo CD Application Manifests
+
+Once you have applied the Argo CD applications and confirmed they are syncing, commit the manifests so your repo stays the source of truth:
+
+```bash
+git add gitops/argo-apps/
+git commit -m "feat: add ArgoCD Application manifests for production and dev"
+git push origin main
+```
+
+> Argo CD watches the `main` branch of your repo. After this push, changes to `gitops/overlays/production/` or `gitops/overlays/dev/` will be automatically picked up and synced by the corresponding Argo CD Application.
+
 ### Step 2.5: GitOps Workflow
 
 **The New Deployment Process:**
 
 ```bash
-# 1. Developer makes changes
+# 1. Create a feature branch
 git checkout -b feature/new-mario-level
 
-# 2. Update image tag in overlay
-# Edit: gitops/overlays/production/kustomization.yaml
-# Change: newTag: v1.1.0
+# 2. Update the image tag in the production overlay
+# Edit gitops/overlays/production/kustomization.yaml
+# Change:  newTag: v1.0.0
+# To:      newTag: v1.1.0
 
-# 3. Commit and push
+# 3. Commit and push the branch
 git add gitops/overlays/production/kustomization.yaml
 git commit -m "feat: deploy mario v1.1.0"
 git push origin feature/new-mario-level
 
-# 4. Create PR → Merge to main
+# 4. Open a Pull Request with gh CLI
+gh pr create \
+  --title "feat: deploy mario v1.1.0" \
+  --body "Update production image tag to v1.1.0" \
+  --base main \
+  --head feature/new-mario-level
 
-# 5. Argo CD auto-syncs (within 3 minutes)
-# OR manual sync:
+# 5. Review, approve, and merge via gh CLI
+gh pr list                          # see open PRs
+gh pr merge --merge --delete-branch # merge once approved
+
+# 6. Argo CD detects the change in main within ~3 minutes and auto-syncs
+# To trigger an immediate sync instead:
 argocd app sync mario-production
 
-# 6. Monitor deployment
+# 7. Monitor the deployment
 argocd app get mario-production --refresh
 kubectl get pods -n production -w
 ```
+
+> **Steps 2.5 and 2.6 require no manual `kubectl apply`.** Once your manifests are in `main`, Argo CD reconciles the cluster state automatically — this is the GitOps loop in action.
 
 ### Step 2.6: Rollback with GitOps
 
@@ -1355,15 +1450,32 @@ jobs:
         git push
 ```
 
-### Step 6.3: GitHub Secrets Configuration
+### Step 6.3: GitHub Secrets and Variables with gh CLI
 
-Add these secrets to your GitHub repository:
+Set repository secrets and variables from the terminal — no browser required.
 
 ```bash
-# Go to: Settings → Secrets and variables → Actions → New repository secret
+# ── Secrets (encrypted, never visible after being set) ──────────────────────
+gh secret set AWS_ACCESS_KEY_ID     --body "<your-access-key-id>"
+gh secret set AWS_SECRET_ACCESS_KEY --body "<your-secret-access-key>"
 
-AWS_ACCESS_KEY_ID: <your-access-key>
-AWS_SECRET_ACCESS_KEY: <your-secret-key>
+# ── Variables (plaintext, visible in workflow logs) ─────────────────────────
+gh variable set AWS_REGION       --body "<YOUR-REGION>"
+gh variable set ECR_REPOSITORY   --body "mario"
+
+# Verify what was set
+gh secret list
+gh variable list
+```
+
+> **Why separate secrets from variables?**  
+> Secrets are masked in logs and encrypted at rest — use them for credentials.  
+> Variables are visible in run logs — use them for non-sensitive config like region and repo name.
+
+To set a secret that contains special characters (e.g., a JSON key file), pipe it in instead:
+
+```bash
+cat credentials.json | gh secret set GCP_SA_KEY
 ```
 
 ### Step 6.4: Create Dockerfile (if not exists)

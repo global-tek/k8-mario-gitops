@@ -192,8 +192,7 @@ aws iam add-role-to-instance-profile \
   --role-name k8s-mario-workshop-role
 
 # 4. Get the EC2 instance ID (run this ON the EC2 instance itself)
-export INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-echo "Instance ID: $INSTANCE_ID"
+export INSTANCE_ID=$(TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600") && curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id) && echo "Instance ID: $INSTANCE_ID"
 
 # 5. Associate the profile with the running instance
 aws ec2 associate-iam-instance-profile \
@@ -207,7 +206,7 @@ aws ec2 associate-iam-instance-profile \
 
 ```bash
 # 1. Get the existing association ID
-export INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+export INSTANCE_ID=$(TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600") && curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)
 
 export ASSOC_ID=$(aws ec2 describe-iam-instance-profile-associations \
   --filters Name=instance-id,Values=$INSTANCE_ID \
@@ -249,33 +248,46 @@ The modern approach separates **application code** from **deployment manifests**
 
 **Directory Structure:**
 ```
-k8s-mario/
-├── app/                          # Application source (if you have it)
-├── infrastructure/               # Terraform for EKS
-│   └── EKS-TF/
-├── gitops/                       # GitOps manifests (NEW)
-│   ├── base/                     # Base Kustomize configs
+k8s-mario-v2/
+├── README.md
+├── MODERN-DEVOPS-WORKSHOP.md     # This guide
+├── QUICK-REFERENCE.md            # Command cheat-sheet
+├── custom_dashboard.json         # Pre-built Grafana dashboard
+├── script.sh                     # Tool installer (run first)
+├── setup.sh                      # Interactive automated setup
+├── validate.sh                   # Post-setup validation
+│
+├── EKS-TF/                       # Terraform — EKS cluster
+│   ├── main.tf
+│   ├── provider.tf
+│   └── backend.tf
+│
+├── .github/
+│   └── workflows/
+│       ├── ci-pipeline.yaml      # Retag → ECR → update manifests
+│       └── security-scan.yaml    # Scheduled security scanning
+│
+├── gitops/                       # GitOps manifests (Kustomize)
+│   ├── base/                     # Shared base configs
 │   │   ├── kustomization.yaml
 │   │   ├── deployment.yaml
 │   │   └── service.yaml
-│   ├── overlays/                 # Environment-specific
+│   ├── overlays/                 # Environment-specific overrides
 │   │   ├── dev/
-│   │   │   └── kustomization.yaml
-│   │   ├── staging/
 │   │   │   └── kustomization.yaml
 │   │   └── production/
 │   │       ├── kustomization.yaml
+│   │       ├── deployment-patch.yaml
 │   │       └── canary.yaml
-│   └── argo-apps/                # Argo CD Applications
-│       └── mario-app.yaml
-├── .github/
-│   └── workflows/
-│       ├── ci-pipeline.yaml      # CI Pipeline
-│       └── security-scan.yaml    # Security scanning
-├── policies/                     # OPA Policies (NEW)
-│   └── deployment-policies.rego
-└── docs/
-    └── runbooks/
+│   └── argo-apps/                # Argo CD Application CRs
+│       ├── mario-production.yaml
+│       └── mario-dev.yaml
+│
+└── policies/                     # OPA Gatekeeper ConstraintTemplates
+    ├── k8s-require-resources.yaml
+    ├── k8s-block-latest-tag.yaml
+    ├── k8s-require-non-root.yaml
+    └── production-constraints.yaml
 ```
 
 **Action Items:**
@@ -429,9 +441,10 @@ resources:
   - deployment.yaml
   - service.yaml
 
-commonLabels:
-  app: mario
-  managed-by: argocd
+labels:
+  - pairs:
+      app: mario
+      managed-by: argocd
 
 images:
   - name: mario-game
@@ -555,14 +568,14 @@ kind: Kustomization
 
 namespace: production
 
-bases:
+resources:
   - ../../base
 
-patchesStrategicMerge:
-  - deployment-patch.yaml
+patches:
+  - path: deployment-patch.yaml
 
 images:
-  - name: mario-game
+  - name: <AWS_ACCOUNT_ID>.dkr.ecr.<YOUR-REGION>.amazonaws.com/mario
     newTag: v1.0.0  # Immutable tag
 
 replicas:

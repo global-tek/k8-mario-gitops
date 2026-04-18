@@ -322,7 +322,7 @@ git config --global user.name "Your Name"
 git config --global user.email "you@example.com"
 
 # Clone the source repo into a new directory named k8s-mario-v2
-git clone https://github.com/Aj7Ay/k8s-mario.git k8s-mario-v2
+git clone https://github.com/global-tek/k8s-mario.git k8s-mario-v2
 cd k8s-mario-v2
 
 # Remove the upstream remote so you start clean
@@ -376,7 +376,7 @@ export AWS_REGION=<YOUR-REGION>
 export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 # Create the S3 bucket for Terraform remote state
-# Then update EKS-TF/main.tf with this exact bucket name
+# Then update EKS-TF/backend.tf with this exact bucket name
 aws s3api create-bucket \
   --bucket <YOUR-UNIQUE-BUCKET-NAME> \
   --region $AWS_REGION
@@ -396,7 +396,7 @@ export ECR_URI=$(aws ecr describe-repositories \
 echo "ECR URI: $ECR_URI"
 ```
 
-> **Update `EKS-TF/main.tf`** — replace the S3 bucket name placeholder with the bucket name you created above before running Terraform.
+> **Update `EKS-TF/backend.tf`** — replace the S3 bucket name placeholder with the bucket name you created above before running Terraform.
 
 #### 6. Deploy EKS Cluster with Terraform
 

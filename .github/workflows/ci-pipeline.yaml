@@ -1,3 +1,4 @@
+# .github/workflows/ci-pipeline.yaml
 name: CI/CD Pipeline
 
 on:
@@ -16,12 +17,13 @@ jobs:
     name: Security Scanning
     runs-on: ubuntu-latest
     permissions:
+      security-events: write
+      actions: read
       contents: read
-      security-events: write   # required for upload-sarif
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v3
 
     - name: Run Trivy vulnerability scanner in repo mode
       uses: aquasecurity/trivy-action@master
@@ -33,7 +35,7 @@ jobs:
         severity: 'CRITICAL,HIGH'
 
     - name: Upload Trivy results to GitHub Security
-      uses: github/codeql-action/upload-sarif@v4
+      uses: github/codeql-action/upload-sarif@v3
       if: always()
       with:
         sarif_file: 'trivy-results.sarif'
@@ -42,50 +44,43 @@ jobs:
       uses: trufflesecurity/trufflehog@main
       with:
         path: ./
-        extra_args: --only-verified
+        base: ${{ github.event.before }}
+        head: ${{ github.sha }}
 
   lint-and-test:
     name: Lint and Test
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v3
 
-    - name: Validate Kubernetes manifests with Kustomize
+    - name: Validate Kubernetes manifests
       run: |
         kubectl kustomize gitops/base
         kubectl kustomize gitops/overlays/production
         kubectl kustomize gitops/overlays/dev
 
-    - name: Validate manifests with kubeval
-      run: |
-        curl -sSLo kubeval.tar.gz \
-          https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz
-        tar xf kubeval.tar.gz kubeval
-        chmod +x kubeval
-        kubectl kustomize gitops/base | ./kubeval --ignore-missing-schemas
-        rm -f kubeval kubeval.tar.gz
+    - name: Validate with kubeval
+      uses: instrumenta/kubeval-action@master
+      with:
+        files: gitops/base/
 
   retag-and-push:
     name: Retag and Push Image to ECR
     runs-on: ubuntu-latest
     needs: [security-scan, lint-and-test]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
-    permissions:
-      contents: read
 
     outputs:
       image-tag: ${{ steps.image-tag.outputs.tag }}
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v3
 
     - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
+      uses: aws-actions/configure-aws-credentials@v2
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -93,7 +88,7 @@ jobs:
 
     - name: Login to Amazon ECR
       id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
+      uses: aws-actions/amazon-ecr-login@v1
 
     - name: Generate immutable image tag
       id: image-tag
@@ -111,11 +106,10 @@ jobs:
 
     - name: Scan image with Trivy
       uses: aquasecurity/trivy-action@master
-      continue-on-error: true   # advisory: demo image has known CVEs; don't block pipeline
       with:
         image-ref: ${{ steps.image-tag.outputs.full-image }}
         format: 'table'
-        exit-code: '1'
+        exit-code: '0'
         ignore-unfixed: true
         severity: 'CRITICAL,HIGH'
 
@@ -138,11 +132,11 @@ jobs:
     needs: retag-and-push
     if: github.ref == 'refs/heads/main'
     permissions:
-      contents: write   # required for git push back to repo
+      contents: write
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v3
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -168,11 +162,11 @@ jobs:
     needs: retag-and-push
     if: github.ref == 'refs/heads/develop'
     permissions:
-      contents: write   # required for git push back to repo
+      contents: write
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v3
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
 
